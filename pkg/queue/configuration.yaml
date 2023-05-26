@@ -1,0 +1,43 @@
+dataSources:
+  - name: default
+    redis:
+      host: "localhost:6379"
+queues:
+  - name: retry
+    redis:
+      dataSource: default
+      type: zset
+      key: "retry"
+conditionals:
+  - name: retryGreaterThan3
+    comparison: 3
+    operator: ">"
+    element: Retries
+  - name: errorContainsNoMethodError
+    comparison: "NoMethodError"
+    operator: "contains"
+    element: ErrorMessage
+
+#execs:
+#  - name: "asdf"
+#    conditionalMiddleware:
+#      - name: retryGreaterThan3
+
+# pipeline is a single instance that is run
+# this should be 1 per pod instance
+pipeline:
+  name: retry
+  getItems:
+    - name: retry
+  decisionTree:
+    - name: retryGreaterThan3
+      success:
+        name: removeFromRetry
+        removeItems:
+          - name: retry
+    - name: errorContainsNoMethodError
+      success:
+        name: errorContainsNoMethodError
+        # queue in which to remove from / push to
+        removeItems:
+          - name: retry
