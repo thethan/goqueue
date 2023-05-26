@@ -1,4 +1,4 @@
 vendor/
 .idea/
 
-./**/*.yml
+./pkg/queue/*.yml
