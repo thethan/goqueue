@@ -80,7 +80,7 @@ func BuildPipeline(ctx context.Context, configFileLocation string) (*pipelines.P
 }
 func makeQueues(configuration Configuration) (map[string]queues.Queue, error) {
 	dataSourceNames := map[string]interface{}{}
-	queues := map[string]queues.Queue{}
+	queueMap := map[string]queues.Queue{}
 	for _, queueConfiguration := range configuration.DataSources {
 		// todo move to its won function
 		if queueConfiguration.RedisConfiguration != nil {
@@ -111,12 +111,12 @@ func makeQueues(configuration Configuration) (map[string]queues.Queue, error) {
 				zsetQueue := zset.NewZSetQueue(queueConfiguration.RedisConfiguration.Key, redisClient)
 				_ = zsetQueue
 
-				queues[queueConfiguration.Name] = zsetQueue
+				queueMap[queueConfiguration.Name] = zsetQueue
 			}
 		}
 	}
 
-	return queues, nil
+	return queueMap, nil
 }
 
 func makeConditionals(configuration Configuration) (map[string]conditionals.ConditionFunc, error) {

@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"github.com/go-redis/redis/v8"
 	"github.com/thethan/goqueue/internal/job"
-	"github.com/thethan/goqueue/internal/queues"
-
 	"github.com/thethan/goqueue/internal/logs"
-	goqueueRedis "github.com/thethan/goqueue/internal/redis"
+	"github.com/thethan/goqueue/internal/queues"
 	"math"
 	"time"
 )
@@ -17,10 +15,12 @@ import (
 const count = 100
 
 func NewZSetQueue(key string, client *redis.Client) *ZSetQueue {
-	return &ZSetQueue{key: key, client: client}
+	jobJuilder := job.NewBuilder(&job.Configuration{Type: "json"})
+
+	return &ZSetQueue{key: key, client: client, jobbuilder: jobJuilder}
 }
 
-func (r *ZSetQueue) GetItems(ctx context.Context, jobChan chan<- job.Job) error {
+func (z *ZSetQueue) GetItems(ctx context.Context, jobChan chan<- job.Job) error {
 	defer func() {
 		close(jobChan)
 	}()
@@ -32,8 +32,8 @@ func (r *ZSetQueue) GetItems(ctx context.Context, jobChan chan<- job.Job) error 
 		default:
 			stop := fmt.Sprintf("%d.%d", time.Now().Add(time.Hour*48).Unix(), time.Now().Nanosecond())
 
-			z := redis.ZRangeArgs{
-				Key:     r.key,
+			zRangeArgs := redis.ZRangeArgs{
+				Key:     z.key,
 				Offset:  0,
 				Count:   count,
 				Start:   "-inf",
@@ -41,7 +41,7 @@ func (r *ZSetQueue) GetItems(ctx context.Context, jobChan chan<- job.Job) error 
 				Stop:    stop,
 			}
 
-			res, err := r.client.ZRangeArgsWithScores(ctx, z).Result()
+			res, err := z.client.ZRangeArgsWithScores(ctx, zRangeArgs).Result()
 			if err != nil {
 				return err
 			}
@@ -65,81 +65,75 @@ func (r *ZSetQueue) GetItems(ctx context.Context, jobChan chan<- job.Job) error 
 					jobStr = string(byts)
 				}
 
-				j := goqueueRedis.RedisJob{}
-
-				err = json.Unmarshal([]byte(jobStr), &j)
+				j, err := z.jobbuilder.MakeJob([]byte(jobStr))
 				if err != nil {
 					return fmt.Errorf("could not convert job to string")
 				}
 
-				j.SetRaw(jobStr)
-
-				jobChan <- &j
+				jobChan <- j
 			}
 		}
 	}
 }
 
-func (r *ZSetQueue) PushItems(ctx context.Context, job job.Job) error {
+func (z *ZSetQueue) PushItems(ctx context.Context, job job.Job) error {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (r *ZSetQueue) RemoveItems(ctx context.Context, job job.Job) error {
-	sideJob, ok := job.(*goqueueRedis.RedisJob)
-	if !ok {
-		return fmt.Errorf("could not convert job to sidekiq job")
-	}
+func (z *ZSetQueue) RemoveItems(ctx context.Context, job job.Job) error {
 
-	retry := sideJob.RetryCount
-	if retry < 3 {
-		return nil
-	}
-
-	intCmd := r.client.ZRem(ctx, r.key, sideJob.Raw())
+	intCmd := z.client.ZRem(ctx, z.key, job.Raw())
 	if intCmd.Err() != nil {
 		return intCmd.Err()
 	}
 
-	logs.Info(ctx, "removed from retry queue", logs.WithValue("jid", sideJob.Jid), logs.WithValue("int", intCmd.Val()))
+	jidVal, err := job.GetValue("jid")
+	if err != nil {
+		return err
+	}
+
+	logs.Info(ctx, "removed from retry queue", logs.WithValue("id", jidVal.String()), logs.WithValue("int", intCmd.Val()))
 
 	return nil
 }
 
 type ZSetQueue struct {
-	key    string
-	client *redis.Client
+	jobbuilder *job.Builder
+	key        string
+	client     *redis.Client
 }
 
-func (r *ZSetQueue) ZRangeRemove(ctx context.Context, errorChan chan error) queues.RemoveItem {
+func (z *ZSetQueue) ZRangeRemove(ctx context.Context, errorChan chan error) queues.RemoveItem {
 	return func(ctx context.Context, key string, jobJob job.Job) error {
 		defer func() {
 			close(errorChan)
 		}()
 
-		err := r.RemoveItems(ctx, jobJob)
+		err := z.RemoveItems(ctx, jobJob)
 		if err != nil {
 			errorChan <- err
 		}
 
-		redisJob := jobJob.(*goqueueRedis.RedisJob)
+		jidVal, err := jobJob.GetValue("jid")
+		if err != nil {
+			return err
+		}
 
-		logs.Info(ctx, "removed from retry queue", logs.WithValue("jid", redisJob.Jid))
+		logs.Info(ctx, "removed from retry queue", logs.WithValue("jid", jidVal.String()))
 
 		return nil
 	}
 }
 
-func (r *ZSetQueue) ZRangePushItems(ctx context.Context, errChan chan<- error) queues.PushItems {
+func (z *ZSetQueue) ZRangePushItems(ctx context.Context, errChan chan<- error) queues.PushItems {
 	return func(ctx context.Context, key string, jobJob job.Job) error {
 		defer func() {
 			close(errChan)
 		}()
 
-		j := jobJob.(*goqueueRedis.RedisJob)
-
-		z := &redis.Z{Member: j.Raw(), Score: getDelay(j)}
-		intCmd := r.client.ZAdd(ctx, key, z)
+		zQuery := &redis.Z{Member: jobJob.Raw(), Score: getDelay(jobJob)}
+		intCmd := z.client.ZAdd(ctx, key, zQuery)
 		if intCmd.Err() != nil {
 
 			errChan <- intCmd.Err()
@@ -150,30 +144,37 @@ func (r *ZSetQueue) ZRangePushItems(ctx context.Context, errChan chan<- error) q
 	}
 }
 
-func getDelay(sidekiqJob *goqueueRedis.RedisJob) float64 {
-	if sidekiqJob.Retry == 0 || sidekiqJob.Retry == true {
+func getDelay(jobJob job.Job) float64 {
+	retry, err := jobJob.GetValue("retry")
+	if err != nil {
+		logs.Warn(context.Background(), "could not get retry value", logs.WithError(err))
+	}
+
+	switch retry.Interface().(type) {
+	case int, int32, int64:
+		return float64(retry.Int())
+	case bool:
 		return 0
+	case float32, float64:
+		break
 	}
 
-	retry, ok := sidekiqJob.Retry.(float64)
-	if !ok {
-		retry = 1
-	}
+	retryFloat := retry.Float()
 
-	delay := math.Pow(2, retry) + 15 + float64(time.Now().Unix())
+	delay := math.Pow(2, retryFloat) + 15 + float64(time.Now().Unix())
 
 	return delay
 
 }
 
-func (r *ZSetQueue) ZRangeGetItems(ctx context.Context, key string, errChan chan<- error, count int64) queues.GetItems {
+func (z *ZSetQueue) ZRangeGetItems(ctx context.Context, key string, errChan chan<- error, count int64) queues.GetItems {
 	defer func() {
 		close(errChan)
 	}()
 
 	jobChan := make(chan job.Job, 1)
 
-	err := r.GetItems(ctx, jobChan)
+	err := z.GetItems(ctx, jobChan)
 	if err != nil {
 		errChan <- err
 		return nil

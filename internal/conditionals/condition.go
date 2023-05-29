@@ -3,6 +3,7 @@ package conditionals
 import (
 	"context"
 	"github.com/thethan/goqueue/internal/job"
+	"github.com/thethan/goqueue/internal/logs"
 	"reflect"
 	"strings"
 )
@@ -10,30 +11,32 @@ import (
 type condition struct {
 	operator   Operator
 	element    string
-	comparison interface{}
+	comparison reflect.Value
 }
 
 func NewCondition(element string, operator Operator, comparison interface{}) condition {
-	return condition{element: element, operator: operator, comparison: comparison}
+	compVal := reflect.ValueOf(comparison)
+	switch compVal.Kind() {
+	case reflect.Int, reflect.Int16, reflect.Int32, reflect.Int64:
+		compVal = reflect.ValueOf(float64(compVal.Int()))
+	}
+
+	return condition{element: element, operator: operator, comparison: compVal}
 }
 
 func (c condition) Evaluate(ctx context.Context, job job.Job) bool {
 	//t := reflect.TypeOf(job)
 
-	r := reflect.ValueOf(job)
-	f := reflect.Indirect(r).FieldByName(c.element)
-
-	if f.Kind() == reflect.Invalid {
-		return c.getMethod(job)
+	r, err := job.GetValue(c.element)
+	if err != nil {
+		logs.Warn(ctx, "error getting value", logs.WithError(err), logs.WithValue("element", c.element))
+		return false
 	}
 
 	// this is assuming that the field is an attribute of the job
-	if f.Kind() == reflect.String {
-		return c.stringEval(f)
-	}
-
-	return false
+	return c.eval(r)
 }
+
 func (c condition) getMethod(job job.Job) bool {
 	f := reflect.ValueOf(job).MethodByName(c.element)
 
@@ -56,23 +59,19 @@ func (c condition) eval(v reflect.Value) bool {
 }
 
 func (c condition) stringEval(v reflect.Value) bool {
-	comp := reflect.ValueOf(c.comparison)
-
 	switch c.operator {
 	case Contains:
 		mainString := v.String()
-		subString := comp.String()
+		subString := c.comparison.String()
 		return strings.Contains(mainString, subString)
 	}
 
 	return false
 }
 func (c condition) intEval(v reflect.Value) bool {
-	comp := reflect.ValueOf(c.comparison)
-
 	switch c.operator {
 	case GreaterThan:
-		return v.Int() > comp.Int()
+		return v.Float() > c.comparison.Float()
 	}
 
 	return false
