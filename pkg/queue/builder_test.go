@@ -5,7 +5,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"os"
 	"testing"
-	"time"
 )
 
 func TestConfiguration(t *testing.T) {
@@ -19,13 +18,14 @@ func TestConfiguration(t *testing.T) {
 
 		pipeline, err := BuildPipeline(ctx, fileName)
 		require.Nil(t, err)
-		go func() {
-			err = pipeline.Start(ctx)
-			require.Nil(t, err)
-		}()
+		//go func() {
+		err = pipeline.Start(ctx)
+		require.Nil(t, err)
+		//}()
 
-		time.Sleep(time.Second * 5)
-		cancel()
+		//time.Sleep(time.Second * 5)
+		_ = cancel
+		//cancel()
 	})
 
 }
