@@ -8,6 +8,7 @@ import (
 	"github.com/thethan/goqueue/internal/job"
 	"github.com/thethan/goqueue/internal/logs"
 	"github.com/thethan/goqueue/internal/queues"
+	"io"
 	"math"
 	"time"
 )
@@ -76,26 +77,25 @@ func (z *ZSetQueue) GetItems(ctx context.Context, jobChan chan<- job.Job) error 
 	}
 }
 
-func (z *ZSetQueue) PushItems(ctx context.Context, job job.Job) error {
+func (z *ZSetQueue) PushItems(context.Context, job.Job, io.ReadWriter, io.ReadWriter, chan error) {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (z *ZSetQueue) RemoveItems(ctx context.Context, job job.Job) error {
-
+func (z *ZSetQueue) RemoveItems(ctx context.Context, job job.Job, stdOut io.ReadWriter, stdErr io.ReadWriter, errChan chan error) {
+	close(errChan)
 	intCmd := z.client.ZRem(ctx, z.key, job.Raw())
 	if intCmd.Err() != nil {
-		return intCmd.Err()
+		errChan <- intCmd.Err()
 	}
 
 	jidVal, err := job.GetValue("jid")
 	if err != nil {
-		return err
+		errChan <- intCmd.Err()
 	}
 
 	logs.Info(ctx, "removed from retry queue", logs.WithValue("id", jidVal.String()), logs.WithValue("int", intCmd.Val()))
 
-	return nil
 }
 
 type ZSetQueue struct {
@@ -104,30 +104,31 @@ type ZSetQueue struct {
 	client     *redis.Client
 }
 
-func (z *ZSetQueue) ZRangeRemove(ctx context.Context, errorChan chan error) queues.RemoveItem {
-	return func(ctx context.Context, key string, jobJob job.Job) error {
+func (z *ZSetQueue) ZRangeRemove(ctx context.Context, key string) queues.RemoveItem {
+	return func(ctx context.Context, jobJob job.Job, stdOut, stdErr io.ReadWriter, errChan chan error) {
 		defer func() {
-			close(errorChan)
+			close(errChan)
 		}()
 
-		err := z.RemoveItems(ctx, jobJob)
-		if err != nil {
-			errorChan <- err
+		newErrChan := make(chan error)
+		go z.RemoveItems(ctx, jobJob, stdOut, stdErr, newErrChan)
+		for err := range newErrChan {
+			errChan <- err
 		}
 
 		jidVal, err := jobJob.GetValue("jid")
 		if err != nil {
-			return err
+
 		}
 
 		logs.Info(ctx, "removed from retry queue", logs.WithValue("jid", jidVal.String()))
 
-		return nil
+		return
 	}
 }
 
-func (z *ZSetQueue) ZRangePushItems(ctx context.Context, errChan chan<- error) queues.PushItems {
-	return func(ctx context.Context, key string, jobJob job.Job) error {
+func (z *ZSetQueue) ZRangePushItems(ctx context.Context, key string) queues.PushItems {
+	return func(ctx context.Context, jobJob job.Job, stdOut io.ReadWriter, writer io.ReadWriter, errChan chan error) {
 		defer func() {
 			close(errChan)
 		}()
@@ -137,10 +138,8 @@ func (z *ZSetQueue) ZRangePushItems(ctx context.Context, errChan chan<- error) q
 		if intCmd.Err() != nil {
 
 			errChan <- intCmd.Err()
-			return nil
 		}
 
-		return nil
 	}
 }
 

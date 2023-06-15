@@ -6,6 +6,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/spf13/viper"
 	"github.com/thethan/goqueue/internal/conditionals"
+	"github.com/thethan/goqueue/internal/executers"
 	"github.com/thethan/goqueue/internal/job"
 	"github.com/thethan/goqueue/internal/logs"
 	"github.com/thethan/goqueue/internal/pipelines"
@@ -42,7 +43,7 @@ func init() {
 	viper.SetDefault(envRedisAuth, defaultRedisAuth)
 }
 
-func BuildPipeline(ctx context.Context, configFileLocation string) (*pipelines.Pipeline, error) {
+func BuildPipeline(ctx context.Context, configFileLocation string) (pipelines.ProcessPipeline, error) {
 	file, err := os.Open(configFileLocation)
 	if err != nil {
 		logs.Error(ctx, "could not open config file", logs.WithError(err), logs.WithValue("configFileLocation", configFileLocation))
@@ -70,7 +71,13 @@ func BuildPipeline(ctx context.Context, configFileLocation string) (*pipelines.P
 		return nil, err
 	}
 
-	pipeline, err := makePipeline(configuration, queuesMap, conditionalMap)
+	executors, err := makeExecutors(configuration)
+	if err != nil {
+		logs.Error(ctx, "could not get executors ", logs.WithError(err), logs.WithValue("configFileLocation", configFileLocation))
+		return nil, err
+	}
+
+	pipeline, err := makePipeline(configuration, queuesMap, conditionalMap, executors)
 	if err != nil {
 		logs.Error(ctx, "could not open config file", logs.WithError(err), logs.WithValue("configFileLocation", configFileLocation))
 		return nil, err
@@ -136,7 +143,25 @@ func makeConditionals(configuration Configuration) (map[string]conditionals.Cond
 	return conditionalMap, nil
 }
 
-func makePipeline(configuration Configuration, queues map[string]queues.Queue, conditionalMap map[string]conditionals.ConditionFunc) (*pipelines.Pipeline, error) {
+func makeExecutors(configuration Configuration) (map[string]executers.ExecFunc, error) {
+	execMap := make(map[string]executers.ExecFunc)
+	for _, executorConfiguration := range configuration.Executors {
+		// todo move to its own function
+		execFunc, err := executers.NewExecutor(&executers.Configuration{
+			Sprintf: executorConfiguration.SprintfCMD,
+		})
+
+		if err != nil {
+			return nil, err
+		}
+
+		execMap[executorConfiguration.Name] = execFunc.Execute()
+	}
+
+	return execMap, nil
+}
+
+func makePipeline(configuration Configuration, queues map[string]queues.Queue, conditionalMap map[string]conditionals.ConditionFunc, executorsMap map[string]executers.ExecFunc) (pipelines.ProcessPipeline, error) {
 	// todo check length
 	queueGetItems, ok := queues[configuration.Pipelines.GetItems[0].Name]
 	if !ok {
@@ -146,6 +171,12 @@ func makePipeline(configuration Configuration, queues map[string]queues.Queue, c
 	}
 
 	decisionTrees := make([]*pipelines.DecisionTree, 0)
+	execFunc := func(ctx context.Context, job job.Job, stdOut io.ReadWriter, stdErr io.ReadWriter, errChan chan error) {
+		close(errChan)
+	}
+	if configuration.Pipelines.Executor != nil {
+		execFunc = executorsMap[configuration.Pipelines.Executor.Name]
+	}
 	for _, configConditional := range configuration.Pipelines.DecisionTree {
 		if conditional, ok := conditionalMap[configConditional.Name]; ok {
 
@@ -158,26 +189,25 @@ func makePipeline(configuration Configuration, queues map[string]queues.Queue, c
 			}
 
 			failureQueue, err := getQueueForQueueFunc(queues, configConditional.Failure)
-			if err != nil {
-				logs.Error(context.Background(), "could not find queue", logs.WithValue("queueName", configConditional.Success.Name))
+			if err != nil && !configConditional.Failure.Return {
+				logs.Error(context.Background(), "could not find queue", logs.WithValue("queueName", configConditional.Failure.Name))
 
 				return nil, err
 			}
 
-			successFunc := getQueueFunc(successQueue, configConditional.Success)
-			failureFunc := getQueueFunc(failureQueue, configConditional.Failure)
+			successFunc, successReturn := getQueueFunc(successQueue, configConditional.Success)
+			failureFunc, falseReturn := getQueueFunc(failureQueue, configConditional.Failure)
+			if err != nil {
+				return nil, err
+			}
 
 			// then return function
-			decisionTree := pipelines.NewConditionTree(conditional, successFunc, failureFunc)
+			decisionTree := pipelines.NewConditionTree(conditional, successFunc, failureFunc, successReturn, falseReturn)
 			decisionTrees = append(decisionTrees, &decisionTree)
 		} else {
 			logs.Error(context.Background(), "could not find conditional", logs.WithValue("conditionalName", configConditional.Name))
 			return nil, errors.New("could not find conditional")
 		}
-	}
-
-	execFunc := func(ctx context.Context, job job.Job, stdOut io.ReadWriter, stdErr io.ReadWriter, errChan chan error) {
-		close(errChan)
 	}
 
 	pipeline := pipelines.NewPipeline(queueGetItems, execFunc, decisionTrees...)
@@ -209,30 +239,64 @@ func getQueueForQueueFunc(queues map[string]queues.Queue, queueFunc *PipelineCon
 		return getQueue(queues, queueFunc.RemoveItem[0].Name)
 	}
 
-	return nil, errors.New("could not find queue")
+	return &noopQueue{}, nil
 }
-func getQueueFunc(queue queues.Queue, condFunc *PipelineConditionTreeFunc) func(ctx context.Context, job job.Job) error {
-	if condFunc == nil {
-		return func(ctx context.Context, job job.Job) error {
-			logs.Debug(ctx, "noop queue func", logs.WithValue("job", job))
 
-			return nil
+func getExecutorFromMap(queues map[string]executers.ExecFunc, queueFunc *PipelineConditionTreeFunc) (executers.ExecFunc, error) {
+	if queueFunc == nil {
+		return nil, nil
+	}
+
+	if queueFunc.Executors != nil {
+		name := queueFunc.Executors[0].Name
+		executor, ok := queues[name]
+		if !ok {
+			logs.Error(context.Background(), "could not find get executorfunc", logs.WithValue("exec Func", name))
+
+			return nil, errors.New("could not find pipeline func")
 		}
+
+		return executor, nil
+	}
+
+	return nil, errors.New("could not find executor")
+}
+func getQueueFunc(queue queues.Queue, condFunc *PipelineConditionTreeFunc) (executers.ExecFunc, bool) {
+	if condFunc == nil {
+		return func(ctx context.Context, job job.Job, stdOut io.ReadWriter, stdErr io.ReadWriter, errChan chan error) {
+			defer close(errChan)
+			logs.Debug(ctx, "noop queue func", logs.WithValue("job", job))
+		}, false
 	}
 
 	if condFunc.PushItem != nil {
-		return queue.PushItems
+		return queue.PushItems, condFunc.Return
 	}
 
 	if condFunc.RemoveItem != nil {
-		return queue.RemoveItems
+		return queue.RemoveItems, condFunc.Return
 	}
 
-	return func(ctx context.Context, job job.Job) error {
-		logs.Info(ctx, "noop queue func", logs.WithValue("job", job))
+	return func(ctx context.Context, job job.Job, stdOut, stdErr io.ReadWriter, errChan chan error) {
+		defer close(errChan)
+		logs.Debug(ctx, "noop queue func", logs.WithValue("job", job))
 
-		return nil
-	}
+	}, condFunc.Return
 }
 
 // make conditional middleware
+
+type noopQueue struct {
+}
+
+func (queue *noopQueue) GetItems(ctx context.Context, jobChan chan<- job.Job) error {
+	//TODO implement me
+	return nil
+}
+
+func (queue *noopQueue) PushItems(ctx context.Context, job job.Job, stdOut, stdErr io.ReadWriter, error chan error) {
+	close(error)
+}
+func (queue *noopQueue) RemoveItems(ctx context.Context, job job.Job, stdOut, stdErr io.ReadWriter, error chan error) {
+	close(error)
+}
