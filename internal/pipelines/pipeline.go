@@ -9,26 +9,30 @@ import (
 	"github.com/thethan/goqueue/internal/queues"
 )
 
-func NewPipeline(getItems queues.GetQueue, execFunc executers.ExecFunc, decisionTrees ...*DecisionTree) *Pipeline {
+type ProcessPipeline interface {
+	Start(ctx context.Context) error
+}
+
+func NewPipeline(getItems queues.GetQueue, execFunc executers.ExecFunc, decisionTrees ...*DecisionTree) ProcessPipeline {
 	// wrap the exec function in middleware
-	for idx := range decisionTrees {
+	for idx := len(decisionTrees) - 1; idx >= 0; idx-- {
 		execFunc = decisionTrees[idx].Middleware()(execFunc)
 	}
 
-	return &Pipeline{
+	return &pipeline{
 		getItems:     getItems,
 		execFunc:     execFunc,
 		decisionTree: decisionTrees,
 	}
 }
 
-type Pipeline struct {
+type pipeline struct {
 	getItems     queues.GetQueue
 	execFunc     executers.ExecFunc
 	decisionTree []*DecisionTree
 }
 
-func (p *Pipeline) Start(ctx context.Context) error {
+func (p *pipeline) Start(ctx context.Context) error {
 	jobChan := make(chan job.Job)
 	errorChan := make(chan error)
 
@@ -50,7 +54,9 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			stdOut := bytes.NewBuffer([]byte{})
 			stdErr := bytes.NewBuffer([]byte{})
 
-			p.execFunc(ctx, jb, stdOut, stdErr, newErrChan)
+			go func() {
+				p.execFunc(ctx, jb, stdOut, stdErr, newErrChan)
+			}()
 			for err := range newErrChan {
 				logs.Error(ctx, "error in executing from pipeline", logs.WithError(err))
 			}

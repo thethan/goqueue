@@ -1,8 +1,8 @@
 package zset
 
 import (
+	"bytes"
 	"context"
-	"fmt"
 	"github.com/thethan/goqueue/internal/executers"
 	"github.com/thethan/goqueue/internal/job"
 	"github.com/thethan/goqueue/internal/logs"
@@ -29,15 +29,13 @@ func (z *ZSetQueue) RemoveFilterMiddleWare(key string) executers.FilterMiddlewar
 			if float64(val.Int()) > float64(2) {
 				// remove from retry queue
 				newErrorChan := make(chan error)
-
-				err := z.ZRangeRemove(ctx, newErrorChan)(ctx, key, job)
-				if err != nil {
-					errChan <- fmt.Errorf("could not remove from retry queue")
-				}
-
+				stdOut := bytes.NewBuffer([]byte{})
+				stdErr := bytes.NewBuffer([]byte{})
+				go z.ZRangeRemove(ctx, key)(ctx, job, stdOut, stdErr, newErrorChan)
 				for err = range newErrorChan {
 					errChan <- err
 				}
+
 				return
 			}
 

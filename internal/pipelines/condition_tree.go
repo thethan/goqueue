@@ -9,60 +9,74 @@ import (
 	"io"
 )
 
-type conditionReturnFunc func(ctx context.Context, job job.Job) error
+type conditionReturnFunc executers.ExecFunc
 type DecisionTree struct {
 	condition conditionals.ConditionFunc
-	success   Pipeline
 
-	trueMethod conditionReturnFunc
+	trueMethod executers.ExecFunc
 
-	executeAfterConditional bool
-	falseMethod             conditionReturnFunc
+	falseMethod   executers.ExecFunc
+	returnOnFalse bool
+	returnOnTrue  bool
 }
 
-func NewConditionTree(condition conditionals.ConditionFunc, trueFunction, falseFunc conditionReturnFunc) DecisionTree {
+func NewConditionTree(condition conditionals.ConditionFunc, trueFunction, falseFunc executers.ExecFunc, returnOnTrue, returnOnFalse bool) DecisionTree {
 	return DecisionTree{
-		condition:               condition,
-		executeAfterConditional: true,
-		trueMethod:              trueFunction,
-		falseMethod:             falseFunc,
+		condition:     condition,
+		trueMethod:    trueFunction,
+		falseMethod:   falseFunc,
+		returnOnFalse: returnOnFalse,
+		returnOnTrue:  returnOnTrue,
 	}
-}
-
-func (c DecisionTree) run(ctx context.Context, job2 job.Job) error {
-
-	if c.condition(context.Background(), job2) {
-		return c.trueMethod(ctx, job2)
-	}
-
-	return c.falseMethod(ctx, job2)
 }
 
 func (c *DecisionTree) Middleware() executers.FilterMiddleware {
 	return func(next executers.ExecFunc) executers.ExecFunc {
 		return func(ctx context.Context, job job.Job, stdOut io.ReadWriter, stdErr io.ReadWriter, errChan chan error) {
-			// if we hit the true method we want to hit the push before continueing in the
+			defer func() {
+				close(errChan)
+			}()
+			// if we hit the true method we want to hit the push before continuing in the
 			// pipeline
-			if !c.condition(context.Background(), job) {
-				err := c.falseMethod(ctx, job)
-				if err != nil {
-					logs.Error(ctx, "error in running conditional filter middleware failure ", logs.WithError(err))
+			if c.condition(ctx, job) {
+				// make the true condition
+				newErrorChan := make(chan error)
+				go func() {
+					c.trueMethod(ctx, job, stdOut, stdErr, newErrorChan)
+				}()
+				for err := range newErrorChan {
+					errChan <- err
+					logs.Debug(ctx, "conditional filter middleware false was executed")
+				}
+				logs.Debug(ctx, "conditional filter middleware false was executed")
+
+				if c.returnOnTrue {
 					return
 				}
 
-				logs.Debug(ctx, "conditional filter middleware false was executed")
 			} else {
-				err := c.trueMethod(ctx, job)
-				if err != nil {
-					logs.Error(ctx, "error in running conditional filter middleware success ", logs.WithError(err))
+				newErrorChan := make(chan error)
+				go func() {
+					c.falseMethod(ctx, job, stdOut, stdErr, newErrorChan)
+				}()
+				for err := range newErrorChan {
+					errChan <- err
+					logs.Debug(ctx, "conditional filter middleware true was executed")
+
+				}
+
+				if c.returnOnFalse {
 					return
 				}
+
 			}
 
 			logs.Debug(ctx, "will now execute")
+			newErrChan := make(chan error)
 
-			if c.executeAfterConditional {
-				next(ctx, job, stdOut, stdErr, errChan)
+			go next(ctx, job, stdOut, stdErr, newErrChan)
+			for err := range newErrChan {
+				errChan <- err
 			}
 		}
 	}
