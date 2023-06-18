@@ -1,4 +1,4 @@
 vendor/
 .idea/
-
+**/**/configuration*.yaml
 ./pkg/queue/*.yml
