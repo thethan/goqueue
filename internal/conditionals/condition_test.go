@@ -114,4 +114,91 @@ func TestCondition(t *testing.T) {
 			assert.True(t, c.Evaluate(ctx, job))
 		})
 	})
+
+	t.Run("Equal", func(t *testing.T) {
+		t.Run("returns false if not equal", func(t *testing.T) {
+			c := NewCondition("retry_count", Equal, float64(3))
+
+			jsonString := `{"retry_count": 2}`
+
+			builder := job2.NewBuilder(&job2.Configuration{Type: "json"})
+			job, err := builder.MakeJob([]byte(jsonString))
+			require.Nil(t, err)
+
+			assert.False(t, c.Evaluate(ctx, job))
+		})
+		t.Run("returns true if equal", func(t *testing.T) {
+			c := NewCondition("retry_count", Equal, float64(3))
+
+			jsonString := `{"retry_count": 3}`
+
+			builder := job2.NewBuilder(&job2.Configuration{Type: "json"})
+			job, err := builder.MakeJob([]byte(jsonString))
+			require.Nil(t, err)
+
+			assert.True(t, c.Evaluate(ctx, job))
+		})
+
+		t.Run("returns false if not equal - string", func(t *testing.T) {
+			c := NewCondition("retry_count", Equal, "not a test string")
+
+			jsonString := `{"retry_count": "test string"}`
+
+			builder := job2.NewBuilder(&job2.Configuration{Type: "json"})
+			job, err := builder.MakeJob([]byte(jsonString))
+			require.Nil(t, err)
+
+			assert.False(t, c.Evaluate(ctx, job))
+		})
+		t.Run("returns true if equal - string", func(t *testing.T) {
+			c := NewCondition("retry_count", Equal, "test string")
+
+			jsonString := `{"retry_count": "test string"}`
+
+			builder := job2.NewBuilder(&job2.Configuration{Type: "json"})
+			job, err := builder.MakeJob([]byte(jsonString))
+			require.Nil(t, err)
+
+			assert.True(t, c.Evaluate(ctx, job))
+		})
+	})
+}
+
+func TestCondition_FromSlice(t *testing.T) {
+	ctx := context.Background()
+	t.Run("Success", func(t *testing.T) {
+		t.Run("returns false if not equal", func(t *testing.T) {
+			c := NewCondition("args[0]", Equal, 6)
+
+			jsonString := `{"args": [5, "some message"]}`
+
+			builder := job2.NewBuilder(&job2.Configuration{Type: "json"})
+			job, err := builder.MakeJob([]byte(jsonString))
+			require.Nil(t, err)
+
+			assert.False(t, c.Evaluate(ctx, job))
+		})
+		t.Run("returns true if equal - int", func(t *testing.T) {
+			c := NewCondition("args[0]", Equal, 5)
+
+			jsonString := `{"args": [5, "some message"]}`
+
+			builder := job2.NewBuilder(&job2.Configuration{Type: "json"})
+			job, err := builder.MakeJob([]byte(jsonString))
+			require.Nil(t, err)
+
+			assert.True(t, c.Evaluate(ctx, job))
+		})
+		t.Run("returns true if equal - int", func(t *testing.T) {
+			c := NewCondition("args[2]", Equal, "some message")
+
+			jsonString := `{"args": [5, "some message"]}`
+
+			builder := job2.NewBuilder(&job2.Configuration{Type: "json"})
+			job, err := builder.MakeJob([]byte(jsonString))
+			require.Nil(t, err)
+
+			assert.False(t, c.Evaluate(ctx, job))
+		})
+	})
 }

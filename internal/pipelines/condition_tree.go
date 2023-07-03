@@ -6,11 +6,15 @@ import (
 	"github.com/thethan/goqueue/internal/executers"
 	"github.com/thethan/goqueue/internal/job"
 	"github.com/thethan/goqueue/internal/logs"
+	"go.opentelemetry.io/otel/attribute"
+	api "go.opentelemetry.io/otel/metric"
 	"io"
+	"log"
 )
 
 type conditionReturnFunc executers.ExecFunc
 type DecisionTree struct {
+	name      string
 	condition conditionals.ConditionFunc
 
 	trueMethod executers.ExecFunc
@@ -20,8 +24,9 @@ type DecisionTree struct {
 	returnOnTrue  bool
 }
 
-func NewConditionTree(condition conditionals.ConditionFunc, trueFunction, falseFunc executers.ExecFunc, returnOnTrue, returnOnFalse bool) DecisionTree {
+func NewConditionTree(name string, condition conditionals.ConditionFunc, trueFunction, falseFunc executers.ExecFunc, returnOnTrue, returnOnFalse bool) DecisionTree {
 	return DecisionTree{
+		name:          name,
 		condition:     condition,
 		trueMethod:    trueFunction,
 		falseMethod:   falseFunc,
@@ -30,15 +35,30 @@ func NewConditionTree(condition conditionals.ConditionFunc, trueFunction, falseF
 	}
 }
 
-func (c *DecisionTree) Middleware() executers.FilterMiddleware {
+func (c *DecisionTree) Middleware(meter api.Meter) executers.FilterMiddleware {
 	return func(next executers.ExecFunc) executers.ExecFunc {
 		return func(ctx context.Context, job job.Job, stdOut io.ReadWriter, stdErr io.ReadWriter, errChan chan error) {
 			defer func() {
 				close(errChan)
 			}()
+
+			counter, err := meter.Float64Counter("decisionTree", api.WithDescription("a decision tree to determine to proceed or not"))
+			if err != nil {
+				log.Fatal(err)
+			}
 			// if we hit the true method we want to hit the push before continuing in the
 			// pipeline
-			if c.condition(ctx, job) {
+			condition := c.condition(ctx, job)
+			opts := api.WithAttributes(
+				attribute.Key("decisionTree").String(c.name),
+				attribute.Key("returnOnTrue").Bool(c.returnOnTrue),
+				attribute.Key("returnOnFalse").Bool(c.returnOnFalse),
+				attribute.Key("condition").Bool(condition),
+			)
+
+			defer counter.Add(ctx, 1, opts)
+
+			if condition {
 				// make the true condition
 				newErrorChan := make(chan error)
 				go func() {

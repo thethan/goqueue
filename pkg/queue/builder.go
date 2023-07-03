@@ -11,7 +11,10 @@ import (
 	"github.com/thethan/goqueue/internal/logs"
 	"github.com/thethan/goqueue/internal/pipelines"
 	"github.com/thethan/goqueue/internal/queues"
-	"github.com/thethan/goqueue/internal/redis/zset"
+	"github.com/thethan/goqueue/pkg/redis/redis/lrange"
+	"github.com/thethan/goqueue/pkg/redis/redis/zset"
+	"go.opentelemetry.io/otel"
+	metric2 "go.opentelemetry.io/otel/metric"
 	"gopkg.in/yaml.v3"
 	"io"
 	"os"
@@ -52,7 +55,26 @@ func BuildPipeline(ctx context.Context, configFileLocation string) (pipelines.Pr
 
 	decoder := yaml.NewDecoder(file)
 	configuration := Configuration{}
+	//exp, err := otlpmetricgrpc.New(ctx)
+	//if err != nil {
+	//	panic(err)
+	//}
+	//
+	//meterProvider := metric.NewMeterProvider(metric.WithReader(metric.NewPeriodicReader(exp)))
+	//defer func() {
+	//	if err := meterProvider.Shutdown(ctx); err != nil {
+	//		panic(err)
+	//	}
+	//}()
+	//otel.SetMeterProvider(meterProvider)
+	//exporter, err := prometheus.New()
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
+	//provider := metric.NewMeterProvider(metric.WithReader(exporter))
+	//meter := provider.Meter("github.com/open-telemetry/opentelemetry-go/example/prometheus")
 
+	meter := otel.GetMeterProvider().Meter("github.com/open-telemetry/opentelemetry-go/example/prometheus")
 	err = decoder.Decode(&configuration)
 	if err != nil {
 		logs.Fatal(ctx, "could not open config file", logs.WithError(err), logs.WithValue("configFileLocation", configFileLocation))
@@ -77,7 +99,7 @@ func BuildPipeline(ctx context.Context, configFileLocation string) (pipelines.Pr
 		return nil, err
 	}
 
-	pipeline, err := makePipeline(configuration, queuesMap, conditionalMap, executors)
+	pipeline, err := makePipeline(configuration, queuesMap, conditionalMap, executors, meter)
 	if err != nil {
 		logs.Error(ctx, "could not open config file", logs.WithError(err), logs.WithValue("configFileLocation", configFileLocation))
 		return nil, err
@@ -119,7 +141,22 @@ func makeQueues(configuration Configuration) (map[string]queues.Queue, error) {
 				_ = zsetQueue
 
 				queueMap[queueConfiguration.Name] = zsetQueue
+			case LRange:
+				client, ok := dataSourceNames[queueConfiguration.RedisConfiguration.Datasource]
+				if !ok {
+					logs.Fatal(context.Background(), "could not find redisclient", logs.WithValue("datasource", queueConfiguration.RedisConfiguration.Datasource))
+				}
+
+				redisClient, ok := client.(*redis.Client)
+				if !ok {
+					logs.Fatal(context.Background(), "could not find redisclient", logs.WithValue("datasource", queueConfiguration.RedisConfiguration.Datasource))
+				}
+
+				larangeQueue := lrange.NewLRangeQueue(queueConfiguration.RedisConfiguration.Key, redisClient)
+
+				queueMap[queueConfiguration.Name] = larangeQueue
 			}
+
 		}
 	}
 
@@ -136,6 +173,9 @@ func makeConditionals(configuration Configuration) (map[string]conditionals.Cond
 			conditionalMap[configCondition.Name] = conditional.Evaluate
 		case "contains":
 			conditional := conditionals.NewCondition(configCondition.Element, conditionals.Contains, configCondition.Comparison)
+			conditionalMap[configCondition.Name] = conditional.Evaluate
+		case "==":
+			conditional := conditionals.NewCondition(configCondition.Element, conditionals.Equal, configCondition.Comparison)
 			conditionalMap[configCondition.Name] = conditional.Evaluate
 		}
 	}
@@ -161,7 +201,7 @@ func makeExecutors(configuration Configuration) (map[string]executers.ExecFunc, 
 	return execMap, nil
 }
 
-func makePipeline(configuration Configuration, queues map[string]queues.Queue, conditionalMap map[string]conditionals.ConditionFunc, executorsMap map[string]executers.ExecFunc) (pipelines.ProcessPipeline, error) {
+func makePipeline(configuration Configuration, queues map[string]queues.Queue, conditionalMap map[string]conditionals.ConditionFunc, executorsMap map[string]executers.ExecFunc, meter metric2.Meter) (pipelines.ProcessPipeline, error) {
 	// todo check length
 	queueGetItems, ok := queues[configuration.Pipelines.GetItems[0].Name]
 	if !ok {
@@ -202,7 +242,7 @@ func makePipeline(configuration Configuration, queues map[string]queues.Queue, c
 			}
 
 			// then return function
-			decisionTree := pipelines.NewConditionTree(conditional, successFunc, failureFunc, successReturn, falseReturn)
+			decisionTree := pipelines.NewConditionTree(configConditional.Name, conditional, successFunc, failureFunc, successReturn, falseReturn)
 			decisionTrees = append(decisionTrees, &decisionTree)
 		} else {
 			logs.Error(context.Background(), "could not find conditional", logs.WithValue("conditionalName", configConditional.Name))
@@ -210,7 +250,7 @@ func makePipeline(configuration Configuration, queues map[string]queues.Queue, c
 		}
 	}
 
-	pipeline := pipelines.NewPipeline(queueGetItems, execFunc, decisionTrees...)
+	pipeline := pipelines.NewPipeline(configuration.Name, meter, queueGetItems, execFunc, decisionTrees...)
 
 	return pipeline, nil
 }

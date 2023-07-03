@@ -2,3 +2,5 @@ vendor/
 .idea/
 **/**/configuration*.yaml
 ./pkg/queue/*.yml
+
+prod.env
