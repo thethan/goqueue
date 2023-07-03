@@ -1,6 +1,7 @@
 package queue
 
 type Configuration struct {
+	Name        string       `yaml:"name"`
 	DataSources []DataSource `yaml:"dataSources"`
 	// Queues have the ability
 	Queues       []QueueConfiguration    `yaml:"queues"`
@@ -17,8 +18,8 @@ type QueueConfiguration struct {
 type RedisQueueType string
 
 const (
-	ZType RedisQueueType = "zset"
-	LType RedisQueueType = "list"
+	ZType  RedisQueueType = "zset"
+	LRange RedisQueueType = "lrange"
 )
 
 type RedisConfiguration struct {
